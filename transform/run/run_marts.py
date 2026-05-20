@@ -13,7 +13,11 @@ Execution order (dims before fact to avoid forward references):
 Each SQL file is read from disk and executed as a CREATE OR REPLACE TABLE
 targeting the appropriate marts.* table. All runs are idempotent (WRITE_TRUNCATE).
 
-After building all tables, prints a row-count summary for validation.
+After building all tables, the script also:
+  - Creates marts.ai_insights (CREATE TABLE IF NOT EXISTS, partitioned by date)
+  - Creates or replaces marts.v_channel_summary (reporting view over fact_sessions)
+
+Then prints a row-count summary for table validation.
 
 Prerequisites:
     staging.ga4_sessions    — built by transform/run/run_staging.py
@@ -47,7 +51,7 @@ log = logging.getLogger(__name__)
 SCRIPT_DIR    = os.path.dirname(os.path.abspath(__file__))
 TRANSFORM_DIR = os.path.dirname(SCRIPT_DIR)
 PROJECT_ROOT  = os.path.dirname(TRANSFORM_DIR)
-SQL_DIR       = os.path.join(TRANSFORM_DIR, "sql", "marts")
+SQL_DIR          = os.path.join(TRANSFORM_DIR, "sql", "marts")
 
 CREDENTIALS_PATH = os.path.join(PROJECT_ROOT, "credentials", "credentials.json")
 TOKEN_PATH       = os.path.join(PROJECT_ROOT, "credentials", "token.pickle")
@@ -65,6 +69,15 @@ MART_TABLES = [
     ("dim_page.sql",       "dim_page"),
     ("dim_competitor.sql", "dim_competitor"),
     ("fact_sessions.sql",  "fact_sessions"),
+]
+
+# ── Additional objects (executed as raw SQL, not wrapped in CREATE OR REPLACE TABLE) ──
+# Each entry: (sql_file, label_for_logging, search_dir)
+# ai_insights lives in sql/marts/ (it's a physical table setup).
+# v_channel_summary lives in sql/reporting/ (it's a view over the mart).
+RAW_SQL_OBJECTS = [
+    ("ai_insights_table.sql",  "ai_insights",       SQL_DIR),
+    ("v_channel_summary.sql",  "v_channel_summary",  SQL_DIR),
 ]
 
 
@@ -122,39 +135,55 @@ def ensure_dataset(client: bigquery.Client) -> None:
 
 def build_mart_table(client: bigquery.Client, sql_file: str, table_name: str) -> None:
     """
-    Read a mart SQL file and execute it as CREATE OR REPLACE TABLE.
+    Read a mart SQL file and execute it as-is, then log row/column counts.
 
     Args:
         client (bigquery.Client): Authenticated BigQuery client
-        sql_file (str):           Filename of SQL template (e.g., "dim_date.sql")
-        table_name (str):         Target table name in marts dataset
-
-    Process:
-        1. Read SQL file from transform/sql/marts/ directory
-        2. Wrap in CREATE OR REPLACE TABLE DDL
-        3. Execute the query to materialize the table
-        4. Retrieve table metadata and log row/column counts
+        sql_file (str):           Filename of SQL file (e.g., "dim_date.sql")
+        table_name (str):         Target table name in marts dataset (used for post-run metadata fetch)
 
     Note:
-        All tables use CREATE OR REPLACE, making them idempotent.
-        Each mart build is destructive (replaces the table), suitable for
-        scheduled refreshes where the entire table is rebuilt.
+        SQL files are expected to contain their own CREATE OR REPLACE TABLE DDL.
+        This function executes them verbatim and fetches table metadata afterwards
+        to log row and column counts for validation.
     """
     sql_path = os.path.join(SQL_DIR, sql_file)
     with open(sql_path, "r", encoding="utf-8") as fh:
         sql = fh.read()
 
-    table_ref = f"`{GCP_PROJECT}.{MARTS_DATASET}.{table_name}`"
-    ddl = f"CREATE OR REPLACE TABLE {table_ref}\nAS\n{sql}"
-
     log.info("Executing  %-25s  →  %s.%s ...", sql_file, MARTS_DATASET, table_name)
-    client.query(ddl).result()
+    client.query(sql).result()
 
     table = client.get_table(f"{GCP_PROJECT}.{MARTS_DATASET}.{table_name}")
     log.info(
         "  Done  →  %d rows, %d columns",
         table.num_rows, len(table.schema),
     )
+
+
+# ── Raw SQL executor (tables / views that manage their own DDL) ───────────────
+
+def execute_raw_sql(client: bigquery.Client, sql_file: str, label: str, sql_dir: str) -> None:
+    """
+    Execute a SQL file exactly as written — no CREATE OR REPLACE TABLE wrapper.
+
+    Use this for objects that own their own DDL:
+      - ai_insights_table.sql  → CREATE TABLE IF NOT EXISTS (partitioned, idempotent)
+      - v_channel_summary.sql  → CREATE OR REPLACE VIEW (reporting layer)
+
+    Args:
+        client (bigquery.Client): Authenticated BigQuery client
+        sql_file (str):           Filename of the SQL file to execute
+        label (str):              Human-readable name used in log output
+        sql_dir (str):            Directory containing the SQL file
+    """
+    sql_path = os.path.join(sql_dir, sql_file)
+    with open(sql_path, "r", encoding="utf-8") as fh:
+        sql = fh.read()
+
+    log.info("Executing  %-30s  →  marts.%s ...", sql_file, label)
+    client.query(sql).result()
+    log.info("  Done  →  marts.%s", label)
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
@@ -193,7 +222,8 @@ def validate_marts(client: bigquery.Client) -> None:
 
 def main() -> None:
     """
-    Main entry point: build the dimensional mart layer (dims + fact table).
+    Main entry point: build the dimensional mart layer (dims + fact table),
+    then set up the ai_insights table and v_channel_summary reporting view.
 
     Workflow:
         1. Authenticate with GCP using OAuth2 credentials
@@ -204,12 +234,16 @@ def main() -> None:
            - dim_page        (reads staging.ga4_sessions + staging.semrush_keywords)
            - dim_competitor  (reads staging.domain_ranks)
            - fact_sessions   (reads staging.ga4_sessions + all 4 dims)
-        4. Print row count validation for all tables
+        4. Execute additional DDL objects (raw SQL, no wrapper):
+           - ai_insights      (CREATE TABLE IF NOT EXISTS, partitioned by date)
+           - v_channel_summary (CREATE OR REPLACE VIEW over fact_sessions)
+        5. Print row count validation for physical mart tables
 
     Execution Order:
         All dimension tables are built before the fact table to avoid
         forward references. dim_date has no external dependencies and
-        is always built first.
+        is always built first. Additional objects run after fact_sessions
+        since v_channel_summary depends on it.
 
     Prerequisites:
         - transform/run/run_staging.py must have run
@@ -221,10 +255,13 @@ def main() -> None:
         - Table: bi-portfolio-project.marts.dim_page
         - Table: bi-portfolio-project.marts.dim_competitor
         - Table: bi-portfolio-project.marts.fact_sessions
+        - Table: bi-portfolio-project.marts.ai_insights       (partitioned, IF NOT EXISTS)
+        - View:  bi-portfolio-project.marts.v_channel_summary  (reporting view)
 
     Next Steps:
-        Run transform/run/run_reporting.py to build semantic/reporting views
-        Connect Looker Studio to marts.fact_sessions for analysis
+        Connect Looker Studio to marts.fact_sessions or marts.v_channel_summary
+        for channel analysis. Write AI insights to marts.ai_insights via the
+        Claude API pipeline.
     """
     log.info("Starting mart layer build...")
     log.info("SQL dir  : %s", SQL_DIR)
@@ -238,6 +275,12 @@ def main() -> None:
         log.info("Building  %s.%s", MARTS_DATASET, table_name)
         log.info("=" * 60)
         build_mart_table(client, sql_file, table_name)
+
+    log.info("=" * 60)
+    log.info("Building additional objects (raw DDL)")
+    log.info("=" * 60)
+    for sql_file, label, sql_dir in RAW_SQL_OBJECTS:
+        execute_raw_sql(client, sql_file, label, sql_dir)
 
     validate_marts(client)
     log.info("Done. Connect Looker Studio to %s.%s.*", GCP_PROJECT, MARTS_DATASET)

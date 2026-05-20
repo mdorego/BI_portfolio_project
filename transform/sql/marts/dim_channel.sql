@@ -8,6 +8,8 @@
   Source : staging.ga4_sessions
 */
 
+CREATE OR REPLACE TABLE `bi-portfolio-project.marts.dim_channel` AS
+
 WITH
 
 -- Collect every distinct (channel, source) pairing that appears in the session data.

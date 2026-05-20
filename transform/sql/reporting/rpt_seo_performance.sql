@@ -28,6 +28,7 @@ WITH enriched AS (
 )
 
 SELECT
+    session_date,
     seo_rank_bucket,
     page_category,
 
@@ -48,5 +49,6 @@ SELECT
 
 FROM enriched
 GROUP BY
+    session_date,
     seo_rank_bucket,
     page_category

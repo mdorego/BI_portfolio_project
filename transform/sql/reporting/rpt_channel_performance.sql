@@ -3,7 +3,7 @@
   ---------------------------
   Channel-level marketing performance: one row per (channel_group, device_group).
 
-  Grain   : channel_group × device_group
+  Grain   : session_date × channel_group × device_group
   Source  : reporting.rpt_sessions_enriched
 
   KPI definitions
@@ -24,6 +24,7 @@ WITH enriched AS (
 )
 
 SELECT
+    session_date,
     channel_group,
     device_group,
 
@@ -44,5 +45,6 @@ SELECT
 
 FROM enriched
 GROUP BY
+    session_date,
     channel_group,
     device_group

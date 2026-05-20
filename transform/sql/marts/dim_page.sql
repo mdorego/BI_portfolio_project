@@ -22,6 +22,8 @@
   All GA4 page paths are retained; SEMrush columns are NULL where no match exists.
 */
 
+CREATE OR REPLACE TABLE `bi-portfolio-project.marts.dim_page` AS
+
 WITH
 
 -- All distinct page paths ever viewed across the full GA4 event stream.

@@ -8,6 +8,8 @@
   Source : GENERATE_DATE_ARRAY — no upstream table dependency
 */
 
+CREATE OR REPLACE TABLE `bi-portfolio-project.marts.dim_date` AS
+
 SELECT
     date_val                                           AS date_id,
     EXTRACT(YEAR        FROM date_val)                 AS year,

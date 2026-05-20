@@ -11,6 +11,8 @@
             cafepress.com, redbubble.com, zazzle.com are competitor benchmarks.
 */
 
+CREATE OR REPLACE TABLE `bi-portfolio-project.marts.dim_competitor` AS
+
 SELECT
     domain,
     semrush_rank,

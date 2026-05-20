@@ -42,6 +42,7 @@ page_seo AS (
 )
 
 SELECT
+    e.session_date,
     e.landing_page_path,
 
     -- SEO attributes for the landing page (NULL when not in dim_page)
@@ -76,6 +77,7 @@ SELECT
 FROM enriched                   e
 LEFT JOIN page_seo              ps ON e.landing_page_path = ps.page_path
 GROUP BY
+    e.session_date,
     e.landing_page_path,
     ps.page_category,
     ps.has_seo_data,
